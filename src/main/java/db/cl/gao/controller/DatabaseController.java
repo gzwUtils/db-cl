@@ -1,6 +1,10 @@
 package db.cl.gao.controller;
+
 import db.cl.gao.common.ApiOutput;
 import db.cl.gao.common.Constant;
+import db.cl.gao.common.param.DatabaseConfig;
+import db.cl.gao.common.param.DatabaseContextHolder;
+import db.cl.gao.config.DatabaseConfigManager;
 import db.cl.gao.service.DatabaseService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -8,16 +12,121 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
 import java.util.Map;
-
-
-@Slf4j
 @SuppressWarnings("unused")
-@RequiredArgsConstructor
+@Slf4j
 @RestController
 @RequestMapping("/api")
+@RequiredArgsConstructor
 public class DatabaseController {
 
     private final DatabaseService databaseService;
+    private final DatabaseConfigManager configManager;
+
+    /**
+     * 获取所有数据库列表
+     */
+    @GetMapping("/databases")
+    public ApiOutput<Object> getDatabases() {
+        try {
+            return ApiOutput.success(databaseService.getDatabases());
+        } catch (Exception e) {
+            log.error("获取数据库列表失败", e);
+            return ApiOutput.failure("获取数据库列表失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 切换到指定数据库
+     */
+    @PostMapping("/database/switch")
+    public ApiOutput<Object> switchDatabase(@RequestBody Map<String, String> request) {
+        String database = request.get("database");
+
+        if (database == null || database.trim().isEmpty()) {
+            return ApiOutput.failure("数据库名不能为空");
+        }
+
+        try {
+            boolean success = databaseService.switchDatabase(database);
+            if (success) {
+                // 设置数据库上下文
+                DatabaseContextHolder.setDatabase(database);
+                return ApiOutput.success("切换到数据库: " + database);
+            } else {
+                return ApiOutput.failure("数据库切换失败: " + database);
+            }
+        } catch (Exception e) {
+            log.error("切换数据库失败: {}", database, e);
+            return ApiOutput.failure("切换数据库失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 获取当前数据库
+     */
+    @GetMapping("/database/current")
+    public ApiOutput<Object> getCurrentDatabase() {
+        try {
+            String currentDb = DatabaseContextHolder.getDatabase();
+            if (currentDb == null) {
+                currentDb = "default";
+            }
+
+            Map<String, Object> result = new HashMap<>();
+            result.put("database", currentDb);
+            result.put("isDefault", currentDb.equals("default"));
+
+            return ApiOutput.success(result);
+        } catch (Exception e) {
+            log.error("获取当前数据库失败", e);
+            return ApiOutput.failure("获取当前数据库失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 添加数据库配置
+     */
+    @PostMapping("/database/config")
+    public ApiOutput<Object> addDatabaseConfig(@RequestBody DatabaseConfig config) {
+        try {
+            if (config.getName() == null || config.getUrl() == null) {
+                return ApiOutput.failure("配置信息不完整");
+            }
+
+            // 设置默认值
+            if (config.getDriverClassName() == null || config.getDriverClassName().isEmpty()) {
+                config.setDriverClassName("com.mysql.cj.jdbc.Driver");
+            }
+            if (config.getInitialSize() <= 0) {
+                config.setInitialSize(5);
+            }
+            if (config.getMinIdle() <= 0) {
+                config.setMinIdle(5);
+            }
+            if (config.getMaxActive() <= 0) {
+                config.setMaxActive(20);
+            }
+
+            configManager.addOrUpdateConfig(config.getName(), config);
+            return ApiOutput.success("添加数据库配置成功");
+        } catch (Exception e) {
+            log.error("添加数据库配置失败", e);
+            return ApiOutput.failure("添加数据库配置失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 获取所有数据库配置
+     */
+    @GetMapping("/database/configs")
+    public ApiOutput<Object> getDatabaseConfigs() {
+        try {
+            return ApiOutput.success(configManager.getAllConfigs());
+        } catch (Exception e) {
+            log.error("获取数据库配置失败", e);
+            return ApiOutput.failure("获取数据库配置失败: " + e.getMessage());
+        }
+    }
 
     /**
      * 获取所有数据表
@@ -62,7 +171,7 @@ public class DatabaseController {
             Map<String, Object> result = databaseService.getTableData(tableName, page, size, sortField, sortOrder);
 
             if (Boolean.TRUE.equals(result.get(Constant.SUCCESS))) {
-                // 移除success字段，因为ApiOutput已经包含
+                // 移除success字段
                 result.remove(Constant.SUCCESS);
                 return ApiOutput.success(result);
             } else {
@@ -155,7 +264,6 @@ public class DatabaseController {
             Map<String, Object> result = databaseService.getDatabaseStats();
 
             if (Boolean.TRUE.equals(result.get(Constant.SUCCESS))) {
-                // 移除success字段
                 result.remove(Constant.SUCCESS);
                 return ApiOutput.success(result);
             } else {
@@ -177,64 +285,6 @@ public class DatabaseController {
         } catch (Exception e) {
             log.error("获取图表示例失败", e);
             return ApiOutput.failure("获取图表示例失败: " + e.getMessage());
-        }
-    }
-
-    /**
-     * 批量获取多个表的信息
-     */
-    @PostMapping("/tables/batch")
-    public ApiOutput<Object> getTablesBatch(@RequestBody Map<String, Object> request) {
-        try {
-            @SuppressWarnings("unchecked")
-            java.util.List<String> tableNames = (java.util.List<String>) request.get("tableNames");
-
-            if (tableNames == null || tableNames.isEmpty()) {
-                return ApiOutput.failure("表名列表不能为空");
-            }
-
-            Map<String, Object> result = new HashMap<>();
-            for (String tableName : tableNames) {
-                getTableStructure(tableName, result);
-            }
-
-            return ApiOutput.success(result);
-        } catch (Exception e) {
-            log.error("批量获取表信息失败", e);
-            return ApiOutput.failure("批量获取表信息失败: " + e.getMessage());
-        }
-    }
-
-    private void getTableStructure(String tableName, Map<String, Object> result) {
-        try {
-            result.put(tableName, databaseService.getTableStructure(tableName));
-        } catch (Exception e) {
-            result.put(tableName, "获取失败: " + e.getMessage());
-        }
-    }
-
-    /**
-     * 获取数据库元信息
-     */
-    @GetMapping("/meta")
-    public ApiOutput<Object> getDatabaseMeta() {
-        try {
-            Map<String, Object> meta = new HashMap<>();
-
-            // 数据库版本
-            String version = databaseService.executeQuery("SELECT VERSION() as version")
-                    .get("data").toString();
-            meta.put("version", version);
-
-            // 字符集
-            String charset = databaseService.executeQuery("SHOW VARIABLES LIKE 'character_set_database'")
-                    .get("data").toString();
-            meta.put("charset", charset);
-
-            return ApiOutput.success(meta);
-        } catch (Exception e) {
-            log.error("获取数据库元信息失败", e);
-            return ApiOutput.failure("获取数据库元信息失败: " + e.getMessage());
         }
     }
 

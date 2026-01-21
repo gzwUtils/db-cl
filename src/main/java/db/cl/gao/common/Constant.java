@@ -24,4 +24,10 @@ public class Constant {
 
 
     public static final String CHAT_DATA = "chartData";
+
+    public static final String DEFAULT_DATABASE = "default";
+
+
+    public static final String TABLE_COUNT = "tableCount";
+
 }

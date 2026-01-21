@@ -1,28 +1,128 @@
 package db.cl.gao.service;
+
 import db.cl.gao.common.Constant;
+import db.cl.gao.common.excep.DbException;
+import db.cl.gao.common.param.DatabaseContextHolder;
+import db.cl.gao.config.DatabaseConfigManager;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import javax.annotation.PostConstruct;
+import javax.sql.DataSource;
 import java.util.*;
 
 @Slf4j
 @Service
+@RequiredArgsConstructor
 public class DatabaseService {
 
+    private final DatabaseConfigManager configManager;
+    private final DataSource defaultDataSource;
+    private JdbcTemplate jdbcTemplate;
 
-    private final JdbcTemplate jdbcTemplate;
-
-    public DatabaseService(JdbcTemplate jdbcTemplate) {
-        this.jdbcTemplate = jdbcTemplate;
+    @PostConstruct
+    public void init() {
+        // 设置默认数据源
+        configManager.setDefaultDataSource(defaultDataSource);
+        jdbcTemplate = new JdbcTemplate(defaultDataSource);
+        log.info("DatabaseService初始化完成，默认数据源: {}", defaultDataSource);
     }
 
+    /**
+     * 获取当前JdbcTemplate（根据上下文决定使用哪个数据库）
+     */
+    private JdbcTemplate getJdbcTemplate() {
+        String dbKey = DatabaseContextHolder.getDatabase();
+        if (dbKey == null || dbKey.isEmpty() || dbKey.equals("default")) {
+            return jdbcTemplate;
+        }
+
+        DataSource dataSource = configManager.getDataSource(dbKey);
+        return new JdbcTemplate(dataSource);
+    }
+
+    /**
+     * 获取所有数据库列表（从配置中获取）
+     */
+    public List<String> getDatabases() {
+        List<String> databases = new ArrayList<>();
+
+        try {
+            // 从配置管理器中获取所有数据库名称
+            List<String> dbNames = configManager.getDatabaseNames();
+
+            if (dbNames.isEmpty()) {
+                // 如果没有配置，返回当前数据库
+                String currentDb = getCurrentDatabaseName(jdbcTemplate);
+                if (currentDb != null) {
+                    databases.add(currentDb);
+                }
+            } else {
+                databases.addAll(dbNames);
+            }
+
+        } catch (Exception e) {
+            log.error("获取数据库列表失败", e);
+            throw new DbException("获取数据库列表失败: " + e.getMessage());
+        }
+
+        return databases;
+    }
+
+    /**
+     * 切换到指定数据库
+     */
+    public boolean switchDatabase(String database) {
+        try {
+            // 验证数据库是否存在
+            if (!configManager.containsDatabase(database)) {
+                log.warn("数据库配置不存在: {}", database);
+                return false;
+            }
+
+            // 尝试连接数据库
+            JdbcTemplate template = new JdbcTemplate(configManager.getDataSource(database));
+            String result = template.queryForObject("SELECT 1", String.class);
+
+            if ("1".equals(result)) {
+                log.info("成功切换到数据库: {}", database);
+                return true;
+            }
+
+            return false;
+        } catch (Exception e) {
+            log.error("切换数据库失败: {}", database, e);
+            return false;
+        }
+    }
+
+    /**
+     * 获取当前数据库名
+     */
+    private String getCurrentDatabaseName(JdbcTemplate template) {
+        try {
+            return template.queryForObject("SELECT DATABASE()", String.class);
+        } catch (Exception e) {
+            log.error("获取当前数据库名失败", e);
+            return null;
+        }
+    }
 
     /**
      * 获取所有表信息
      */
     public List<Map<String, Object>> getTables() {
+        JdbcTemplate template = getJdbcTemplate();
+
+        // 首先获取当前数据库名
+        String currentDb = getCurrentDatabaseName(template);
+        if (currentDb == null) {
+            throw new DbException("无法获取当前数据库名");
+        }
+
         String sql = "SELECT " +
                 "TABLE_NAME, " +
                 "TABLE_COMMENT, " +
@@ -33,17 +133,23 @@ public class DatabaseService {
                 "INDEX_LENGTH, " +
                 "DATA_LENGTH + INDEX_LENGTH as TOTAL_SIZE " +
                 "FROM information_schema.TABLES " +
-                "WHERE TABLE_SCHEMA = DATABASE() " +
+                "WHERE TABLE_SCHEMA = ? " +
                 "ORDER BY TABLE_NAME";
 
         log.debug("执行SQL: {}", sql);
-        return jdbcTemplate.queryForList(sql);
+        return template.queryForList(sql, currentDb);
     }
 
     /**
      * 获取表结构
      */
     public List<Map<String, Object>> getTableStructure(String tableName) {
+        JdbcTemplate template = getJdbcTemplate();
+        String currentDb = getCurrentDatabaseName(template);
+
+        if (currentDb == null) {
+            throw new DbException("无法获取当前数据库名");
+        }
 
         String sql = "SELECT " +
                 "COLUMN_NAME, " +
@@ -54,24 +160,28 @@ public class DatabaseService {
                 "COLUMN_COMMENT, " +
                 "EXTRA " +
                 "FROM information_schema.COLUMNS " +
-                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? " +
+                "WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? " +
                 "ORDER BY ORDINAL_POSITION";
 
         log.debug("获取表结构: {}, SQL: {}", tableName, sql);
-        return jdbcTemplate.queryForList(sql, tableName);
+        return template.queryForList(sql, currentDb, tableName);
     }
 
     /**
      * 获取表数据（支持分页和排序）
      */
     public Map<String, Object> getTableData(String tableName, int page, int size, String sortField, String sortOrder) {
-
+        JdbcTemplate template = getJdbcTemplate();
         Map<String, Object> result = new HashMap<>();
 
         try {
             // 构建排序SQL
             String orderBy = "";
             if (StringUtils.hasText(sortField)) {
+                // 简单的SQL注入防护
+                if (!sortField.matches("^[a-zA-Z0-9_]+$")) {
+                    throw new IllegalArgumentException("非法的排序字段: " + sortField);
+                }
                 orderBy = " ORDER BY " + sortField;
                 if ("desc".equalsIgnoreCase(sortOrder)) {
                     orderBy += " DESC";
@@ -86,20 +196,15 @@ public class DatabaseService {
                     tableName, orderBy, size, offset);
 
             // 获取数据
-            List<Map<String, Object>> data = jdbcTemplate.queryForList(dataSql);
+            List<Map<String, Object>> data = template.queryForList(dataSql);
 
             // 获取总数
             String countSql = String.format("SELECT COUNT(*) as total FROM %s", tableName);
-            Integer total = jdbcTemplate.queryForObject(countSql, Integer.class);
-            
-            if(total ==  null ){
-                total  = 0;
-            }
-            
-            log.debug("获取表数据: {}, SQL: {}, 结果: {}", tableName, dataSql, data);
+            Integer total = template.queryForObject(countSql, Integer.class);
 
-            // 获取主键信息
-            List<String> primaryKeys = getPrimaryKeys(tableName);
+            if (total == null) {
+                total = 0;
+            }
 
             result.put(Constant.SUCCESS, true);
             result.put("data", data);
@@ -107,7 +212,6 @@ public class DatabaseService {
             result.put("page", page);
             result.put("size", size);
             result.put("totalPages", (int) Math.ceil((double) total / size));
-            result.put("primaryKeys", primaryKeys);
 
         } catch (Exception e) {
             log.error("获取表数据失败: {}", tableName, e);
@@ -121,38 +225,34 @@ public class DatabaseService {
      * 执行SQL查询
      */
     public Map<String, Object> executeQuery(String sql) {
+        JdbcTemplate template = getJdbcTemplate();
         Map<String, Object> result = new HashMap<>();
 
         try {
             String upperSql = sql.trim().toUpperCase();
 
-            // 验证SQL安全性（简单检查）
-            if (!isSafeSql(upperSql)) {
+            // 验证SQL安全性
+            if (isSafeSql(upperSql)) {
                 result.put(Constant.SUCCESS, false);
                 result.put(Constant.MESSAGE, "不安全的SQL语句");
                 return result;
             }
 
-            if (upperSql.startsWith("SELECT")) {
+            if (upperSql.startsWith("SELECT") || upperSql.startsWith("SHOW") || upperSql.startsWith("DESC")) {
                 // 查询操作
-                List<Map<String, Object>> data = jdbcTemplate.queryForList(sql);
+                List<Map<String, Object>> data = template.queryForList(sql);
                 result.put(Constant.SUCCESS, true);
                 result.put("data", data);
                 result.put("type", "query");
                 result.put("count", data.size());
                 result.put(Constant.MESSAGE, "查询成功，返回 " + data.size() + " 条记录");
 
-                // 如果是空结果集，添加列信息
-                if (data.isEmpty()) {
-                    result.put("columns", getQueryColumns(sql));
-                }
-
             } else if (upperSql.startsWith("INSERT") || upperSql.startsWith("UPDATE") ||
                     upperSql.startsWith("DELETE") || upperSql.startsWith("ALTER") ||
                     upperSql.startsWith("CREATE") || upperSql.startsWith("DROP") ||
                     upperSql.startsWith("TRUNCATE")) {
                 // DML/DDL操作
-                int rows = jdbcTemplate.update(sql);
+                int rows = template.update(sql);
                 result.put(Constant.SUCCESS, true);
                 result.put("rows", rows);
                 result.put("type", "update");
@@ -175,10 +275,19 @@ public class DatabaseService {
      * 获取图表数据
      */
     public Map<String, Object> getChartData(String sql, String chartType, String title) {
+        JdbcTemplate template = getJdbcTemplate();
         Map<String, Object> result = new HashMap<>();
 
         try {
-            List<Map<String, Object>> data = jdbcTemplate.queryForList(sql);
+            // 验证SQL安全性
+            String upperSql = sql.trim().toUpperCase();
+            if (isSafeSql(upperSql) || !upperSql.startsWith("SELECT")) {
+                result.put(Constant.SUCCESS, false);
+                result.put(Constant.MESSAGE, "只允许SELECT查询语句");
+                return result;
+            }
+
+            List<Map<String, Object>> data = template.queryForList(sql);
 
             if (data.isEmpty()) {
                 result.put(Constant.SUCCESS, true);
@@ -200,6 +309,8 @@ public class DatabaseService {
                 chartResult.put(Constant.CHAT_DATA, formatLineBarChartData(data));
             } else if ("scatter".equals(chartType)) {
                 chartResult.put(Constant.CHAT_DATA, formatScatterChartData(data));
+            } else {
+                chartResult.put(Constant.CHAT_DATA, data); // 默认返回原始数据
             }
 
             result.put(Constant.SUCCESS, true);
@@ -208,7 +319,7 @@ public class DatabaseService {
         } catch (Exception e) {
             log.error("获取图表数据失败: {}", sql, e);
             result.put(Constant.SUCCESS, false);
-            result.put("message", "获取图表数据失败: " + e.getMessage());
+            result.put(Constant.MESSAGE, "获取图表数据失败: " + e.getMessage());
         }
         return result;
     }
@@ -217,29 +328,34 @@ public class DatabaseService {
      * 获取数据库统计信息
      */
     public Map<String, Object> getDatabaseStats() {
+        JdbcTemplate template = getJdbcTemplate();
         Map<String, Object> result = new HashMap<>();
 
         try {
+            String currentDb = getCurrentDatabaseName(template);
+            if (currentDb == null) {
+                result.put(Constant.SUCCESS, false);
+                result.put(Constant.MESSAGE, "无法获取当前数据库");
+                return result;
+            }
+
             // 基本统计
             String baseStatsSql = "SELECT " +
-                    "(SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()) as table_count, " +
-                    "(SELECT COUNT(*) FROM information_schema.VIEWS WHERE TABLE_SCHEMA = DATABASE()) as view_count, " +
-                    "(SELECT SUM(TABLE_ROWS) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()) as row_count, " +
-                    "(SELECT SUM(DATA_LENGTH + INDEX_LENGTH) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()) as total_size, " +
-                    "(SELECT MAX(CREATE_TIME) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()) as last_create_time";
+                    "(SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?) as table_count, " +
+                    "(SELECT SUM(TABLE_ROWS) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?) as row_count, " +
+                    "(SELECT SUM(DATA_LENGTH + INDEX_LENGTH) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?) as total_size";
 
-            Map<String, Object> baseStats = jdbcTemplate.queryForMap(baseStatsSql);
+            Map<String, Object> baseStats = template.queryForMap(baseStatsSql, currentDb, currentDb, currentDb);
 
             // 表大小排名
             String sizeRankSql = "SELECT TABLE_NAME, TABLE_ROWS, " +
-                    "DATA_LENGTH as data_size, INDEX_LENGTH as index_size, " +
                     "DATA_LENGTH + INDEX_LENGTH as total_size " +
                     "FROM information_schema.TABLES " +
-                    "WHERE TABLE_SCHEMA = DATABASE() " +
+                    "WHERE TABLE_SCHEMA = ? " +
                     "ORDER BY total_size DESC " +
                     "LIMIT 10";
 
-            List<Map<String, Object>> sizeRank = jdbcTemplate.queryForList(sizeRankSql);
+            List<Map<String, Object>> sizeRank = template.queryForList(sizeRankSql, currentDb);
 
             result.put(Constant.SUCCESS, true);
             result.put("baseStats", baseStats);
@@ -248,18 +364,17 @@ public class DatabaseService {
         } catch (Exception e) {
             log.error("获取数据库统计失败", e);
             result.put(Constant.SUCCESS, false);
-            result.put("message", "获取统计信息失败: " + e.getMessage());
+            result.put(Constant.MESSAGE, "获取统计信息失败: " + e.getMessage());
         }
         return result;
     }
 
     /**
-     * 获取示例图表SQL
+     * 获取图表示例
      */
     public List<Map<String, Object>> getChartExamples() {
         List<Map<String, Object>> examples = new ArrayList<>();
 
-        // 示例1：按日期统计
         examples.add(createExample(
                 "按日期统计",
                 "SELECT DATE(created_at) as date, COUNT(*) as count FROM your_table GROUP BY DATE(created_at) ORDER BY date",
@@ -267,7 +382,6 @@ public class DatabaseService {
                 "适合时间序列数据"
         ));
 
-        // 示例2：分类统计
         examples.add(createExample(
                 "分类统计",
                 "SELECT category, COUNT(*) as count FROM products GROUP BY category ORDER BY count DESC",
@@ -275,7 +389,6 @@ public class DatabaseService {
                 "适合显示占比"
         ));
 
-        // 示例3：Top N统计
         examples.add(createExample(
                 "Top 10统计",
                 "SELECT product_name, SUM(quantity) as total FROM sales GROUP BY product_name ORDER BY total DESC LIMIT 10",
@@ -288,72 +401,21 @@ public class DatabaseService {
 
     // ============ 私有辅助方法 ============
 
-
     /**
-     * 检查SQL安全性（简单实现）
+     * 检查SQL安全性
      */
     private boolean isSafeSql(String sql) {
-        // 禁止的危险操作
         List<String> dangerousKeywords = Arrays.asList(
                 "DROP DATABASE", "SHUTDOWN", "GRANT", "REVOKE",
-                "CREATE USER", "ALTER USER", "DROP USER"
+                "CREATE USER", "ALTER USER", "DROP USER", "FLUSH PRIVILEGES"
         );
 
         for (String keyword : dangerousKeywords) {
             if (sql.contains(keyword)) {
-                return false;
+                return true;
             }
         }
-        return true;
-    }
-
-    /**
-     * 获取主键列
-     */
-    private List<String> getPrimaryKeys(String tableName) {
-        String sql = "SELECT COLUMN_NAME " +
-                "FROM information_schema.KEY_COLUMN_USAGE " +
-                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY'";
-
-        List<Map<String, Object>> result = jdbcTemplate.queryForList(sql, tableName);
-        List<String> primaryKeys = new ArrayList<>();
-
-        for (Map<String, Object> row : result) {
-            primaryKeys.add((String) row.get("COLUMN_NAME"));
-        }
-
-        return primaryKeys;
-    }
-
-    /**
-     * 获取查询的列信息
-     */
-    private List<String> getQueryColumns(String sql) {
-        List<String> columns = new ArrayList<>();
-        try {
-            // 简化版：从LIMIT之前的部分提取SELECT后的字段
-            String selectPart = sql.toUpperCase();
-            int selectIndex = selectPart.indexOf("SELECT");
-            int fromIndex = selectPart.indexOf("FROM");
-
-            if (selectIndex >= 0 && fromIndex > selectIndex) {
-                String columnStr = sql.substring(selectIndex + 6, fromIndex).trim();
-                String[] parts = columnStr.split(",");
-                for (String part : parts) {
-                    // 去除别名
-                    String column = part.trim();
-                    if (column.contains(" AS ")) {
-                        column = column.substring(column.lastIndexOf(" AS ") + 4).trim();
-                    } else if (column.contains(" ")) {
-                        column = column.substring(column.lastIndexOf(" ") + 1).trim();
-                    }
-                    columns.add(column);
-                }
-            }
-        } catch (Exception e) {
-            log.warn("解析列信息失败", e);
-        }
-        return columns;
+        return false;
     }
 
     /**
@@ -369,8 +431,11 @@ public class DatabaseService {
         if (keyArray.length >= 2) {
             for (Map<String, Object> row : data) {
                 Map<String, Object> item = new HashMap<>();
-                item.put("name", row.get(keyArray[0]));
-                item.put("value", row.get(keyArray[1]));
+                Object nameValue = row.get(keyArray[0]);
+                Object valueValue = row.get(keyArray[1]);
+
+                item.put("name", nameValue != null ? nameValue.toString() : "未知");
+                item.put("value", valueValue != null ? valueValue : 0);
                 formatted.add(item);
             }
         }
@@ -391,20 +456,16 @@ public class DatabaseService {
         List<Object> xAxis = new ArrayList<>();
         List<Map<String, Object>> series = new ArrayList<>();
 
-        for (int i = 1; i < keyArray.length; i++) {
+        if (keyArray.length >= 2) {
             Map<String, Object> seriesItem = new HashMap<>();
-            seriesItem.put("name", keyArray[i]);
+            seriesItem.put("name", keyArray[1]);
             seriesItem.put("type", "line");
             seriesItem.put("data", new ArrayList<>());
             series.add(seriesItem);
-        }
 
-        for (Map<String, Object> row : data) {
-            xAxis.add(row.get(keyArray[0]));
-
-            for (int i = 0; i < series.size(); i++) {
-                String key = keyArray[i + 1];
-                ((List<Object>) series.get(i).get("data")).add(row.get(key));
+            for (Map<String, Object> row : data) {
+                xAxis.add(row.get(keyArray[0]));
+                ((List<Object>) series.get(0).get("data")).add(row.get(keyArray[1]));
             }
         }
 
@@ -426,11 +487,11 @@ public class DatabaseService {
         if (keyArray.length >= 3) {
             for (Map<String, Object> row : data) {
                 Map<String, Object> point = new HashMap<>();
-                point.put("value", Arrays.asList(
-                        row.get(keyArray[0]),
-                        row.get(keyArray[1]),
-                        row.get(keyArray[2])
-                ));
+                List<Object> value = new ArrayList<>();
+                value.add(row.get(keyArray[0]));
+                value.add(row.get(keyArray[1]));
+                value.add(row.get(keyArray[2]));
+                point.put("value", value);
                 formatted.add(point);
             }
         }
