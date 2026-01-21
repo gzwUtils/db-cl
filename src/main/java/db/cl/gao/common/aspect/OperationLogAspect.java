@@ -13,9 +13,14 @@ import org.aspectj.lang.annotation.Pointcut;
 import org.aspectj.lang.reflect.MethodSignature;
 import org.springframework.core.DefaultParameterNameDiscoverer;
 import org.springframework.core.ParameterNameDiscoverer;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.core.io.Resource;
 import org.springframework.expression.Expression;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.expression.spel.support.StandardEvaluationContext;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Component;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
@@ -162,10 +167,97 @@ public class OperationLogAspect {
 
     private void logResult(Object result, OperationLog operationLog) {
         try {
+            // 检查是否为文件下载响应
+            if (isFileDownloadResponse(result)) {
+                // 对于文件下载，记录简化信息
+                Map<String, Object> simplifiedResult = new HashMap<>();
+                simplifiedResult.put("type", "FILE_DOWNLOAD");
+                simplifiedResult.put("status", "SUCCESS");
+
+                // 尝试获取文件信息
+                try {
+                    if (result instanceof ResponseEntity) {
+                        ResponseEntity<?> responseEntity = (ResponseEntity<?>) result;
+                        HttpHeaders headers = responseEntity.getHeaders();
+
+                        // 获取内容类型
+                        MediaType contentType = headers.getContentType();
+                        if (contentType != null) {
+                            simplifiedResult.put("contentType", contentType.toString());
+                        }
+
+                        // 获取文件名
+                        String contentDisposition = headers.getFirst(HttpHeaders.CONTENT_DISPOSITION);
+                        if (contentDisposition != null && contentDisposition.contains("filename=")) {
+                            String fileName = contentDisposition.substring(
+                                    contentDisposition.indexOf("filename=") + 9
+                            ).replace("\"", "");
+                            simplifiedResult.put("fileName", fileName);
+                        }
+
+                        // 获取文件大小
+                        Object body = responseEntity.getBody();
+                        if (body instanceof ByteArrayResource) {
+                            long contentLength = ((ByteArrayResource) body).contentLength();
+                            simplifiedResult.put("fileSize", contentLength);
+                            simplifiedResult.put("fileSizeReadable", formatFileSize(contentLength));
+                        }
+                    }
+                } catch (Exception e) {
+                    log.debug("获取文件信息失败", e);
+                }
+
+                // 记录简化信息
+                String resultJson = objectMapper.writeValueAsString(simplifiedResult);
+                appendMessage(operationLog, "结果", resultJson, RESULT_MAX_LENGTH);
+                return;
+            }
+
+            // 普通结果的序列化逻辑
             String resultJson = objectMapper.writeValueAsString(result);
             appendMessage(operationLog, "结果", resultJson, RESULT_MAX_LENGTH);
         } catch (Exception e) {
             log.warn("记录结果失败", e);
+            // 尝试记录一个简化的错误信息
+            try {
+                Map<String, Object> errorResult = new HashMap<>();
+                errorResult.put("error", "无法序列化响应结果");
+                errorResult.put("type", result != null ? result.getClass().getSimpleName() : "NULL");
+                String errorJson = objectMapper.writeValueAsString(errorResult);
+                appendMessage(operationLog, "结果", errorJson, RESULT_MAX_LENGTH);
+            } catch (Exception ex) {
+                log.error("记录操作日志失败", ex);
+            }
+        }
+    }
+
+    /**
+     * 判断是否为文件下载响应
+     */
+    private boolean isFileDownloadResponse(Object result) {
+        if (!(result instanceof ResponseEntity)) {
+            return false;
+        }
+
+        ResponseEntity<?> response = (ResponseEntity<?>) result;
+        Object body = response.getBody();
+
+        // 检查是否是文件资源
+        return body instanceof Resource || body != null && (body.getClass().getSimpleName().contains("Resource") || body.getClass().getSimpleName().contains("InputStream"));
+    }
+
+    /**
+     * 格式化文件大小
+     */
+    private String formatFileSize(long size) {
+        if (size < 1024) {
+            return size + " B";
+        } else if (size < 1024 * 1024) {
+            return String.format("%.1f KB", size / 1024.0);
+        } else if (size < 1024 * 1024 * 1024) {
+            return String.format("%.1f MB", size / (1024.0 * 1024));
+        } else {
+            return String.format("%.1f GB", size / (1024.0 * 1024 * 1024));
         }
     }
 

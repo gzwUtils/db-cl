@@ -60,6 +60,9 @@ public @interface LogOperation {
         PERMISSION, // 权限操作
         TRANSACTION,// 事务操作
         EXPLAIN,
+        EXPORT,
+        DOWNLOAD,
+        IMPORT,
         OTHER       // 其他
     }
 }
