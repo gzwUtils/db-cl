@@ -1,7 +1,9 @@
 package db.cl.gao.common;
 
 
-@SuppressWarnings("unused")
+import java.util.regex.Pattern;
+
+@SuppressWarnings("all")
 public class Constant {
 
     private Constant(){}
@@ -29,5 +31,13 @@ public class Constant {
 
 
     public static final String TABLE_COUNT = "tableCount";
+
+
+    public static final String UNKNOWN = "unknown";
+
+
+    public static final Pattern TABLE_NAME_PATTERN = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]*$");
+    public static final Pattern SQL_COMMENT_PATTERN = Pattern.compile("--.*|/\\*.*?\\*/");
+    public static final Pattern TABLE_CLEAN_PATTERN = Pattern.compile("[`'\"]");
 
 }

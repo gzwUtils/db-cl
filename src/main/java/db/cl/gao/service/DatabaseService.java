@@ -1,7 +1,11 @@
 package db.cl.gao.service;
 
 import db.cl.gao.common.Constant;
+import db.cl.gao.common.annotation.LogOperation;
+import db.cl.gao.common.annotation.TrackSql;
 import db.cl.gao.common.excep.DbException;
+import db.cl.gao.common.mapper.OperationLogMapper;
+import db.cl.gao.common.model.OperationLog;
 import db.cl.gao.common.param.DatabaseContextHolder;
 import db.cl.gao.config.DatabaseConfigManager;
 import lombok.RequiredArgsConstructor;
@@ -21,6 +25,7 @@ public class DatabaseService {
 
     private final DatabaseConfigManager configManager;
     private final DataSource defaultDataSource;
+    private final OperationLogMapper operationLogMapper;
     private JdbcTemplate jdbcTemplate;
 
     @PostConstruct
@@ -137,7 +142,25 @@ public class DatabaseService {
                 "ORDER BY TABLE_NAME";
 
         log.debug("执行SQL: {}", sql);
-        return template.queryForList(sql, currentDb);
+        long start = System.currentTimeMillis();
+        List<Map<String, Object>> maps = template.queryForList(sql, currentDb);
+        long end = System.currentTimeMillis() - start;
+        log.debug("SQL执行完成，耗时: {}ms", end);
+        operatorLog(currentDb, sql,"information_schema.TABLES",end);
+        return maps;
+    }
+
+    private void operatorLog(String currentDb, String sql,String tableNme,long end) {
+        OperationLog operationLog = new OperationLog();
+        operationLog.setDatabaseName(currentDb);
+        operationLog.setTableName(tableNme);
+        operationLog.setSqlText(sql);
+        operationLog.setOperationType(LogOperation.OperationType.QUERY.name());
+        operationLog.setSuccess(true);
+        operationLog.setCreatedBy("system");
+        operationLog.setCreatedAt(new Date());
+        operationLog.setExecuteTime(new Date(end));
+        operationLogMapper.insert(operationLog);
     }
 
     /**
@@ -164,12 +187,18 @@ public class DatabaseService {
                 "ORDER BY ORDINAL_POSITION";
 
         log.debug("获取表结构: {}, SQL: {}", tableName, sql);
-        return template.queryForList(sql, currentDb, tableName);
+        long start = System.currentTimeMillis();
+        List<Map<String, Object>> maps = template.queryForList(sql, currentDb, tableName);
+        long end = System.currentTimeMillis() - start;
+        log.debug(" COLUMNS SQL执行完成，耗时: {}ms", end);
+        operatorLog(currentDb, sql,"information_schema.COLUMNS",end);
+        return maps;
     }
 
     /**
      * 获取表数据（支持分页和排序）
      */
+    @LogOperation(type = LogOperation.OperationType.QUERY, value = "查询表数据")
     public Map<String, Object> getTableData(String tableName, int page, int size, String sortField, String sortOrder) {
         JdbcTemplate template = getJdbcTemplate();
         Map<String, Object> result = new HashMap<>();
@@ -179,7 +208,7 @@ public class DatabaseService {
             String orderBy = "";
             if (StringUtils.hasText(sortField)) {
                 // 简单的SQL注入防护
-                if (!sortField.matches("^[a-zA-Z0-9_]+$")) {
+                if (!sortField.matches(Constant.TABLE_NAME_PATTERN.pattern())) {
                     throw new IllegalArgumentException("非法的排序字段: " + sortField);
                 }
                 orderBy = " ORDER BY " + sortField;
@@ -224,43 +253,42 @@ public class DatabaseService {
     /**
      * 执行SQL查询
      */
+    @TrackSql(sqlParam = "#sql", description = "执行SQL查询")
+    @LogOperation(logParams = false)
     public Map<String, Object> executeQuery(String sql) {
         JdbcTemplate template = getJdbcTemplate();
         Map<String, Object> result = new HashMap<>();
 
         try {
-            String upperSql = sql.trim().toUpperCase();
+            String originalSql = sql.trim();
+            String upperSql = originalSql.toUpperCase();
 
             // 验证SQL安全性
-            if (isSafeSql(upperSql)) {
+            if (isUnsafeSql(upperSql)) {
                 result.put(Constant.SUCCESS, false);
                 result.put(Constant.MESSAGE, "不安全的SQL语句");
                 return result;
             }
 
-            if (upperSql.startsWith("SELECT") || upperSql.startsWith("SHOW") || upperSql.startsWith("DESC")) {
-                // 查询操作
-                List<Map<String, Object>> data = template.queryForList(sql);
+            // 判断是否是查询语句（SELECT, EXPLAIN, SHOW, DESC）
+            boolean isQuery = upperSql.startsWith("SELECT") ||
+                    upperSql.startsWith("EXPLAIN") ||
+                    upperSql.startsWith("SHOW") ||
+                    upperSql.startsWith("DESC") ||
+                    upperSql.startsWith("DESCRIBE");
+
+            if (isQuery) {
+                // 查询语句
+                List<Map<String, Object>> data = template.queryForList(originalSql);
                 result.put(Constant.SUCCESS, true);
                 result.put("data", data);
-                result.put("type", "query");
                 result.put("count", data.size());
                 result.put(Constant.MESSAGE, "查询成功，返回 " + data.size() + " 条记录");
-
-            } else if (upperSql.startsWith("INSERT") || upperSql.startsWith("UPDATE") ||
-                    upperSql.startsWith("DELETE") || upperSql.startsWith("ALTER") ||
-                    upperSql.startsWith("CREATE") || upperSql.startsWith("DROP") ||
-                    upperSql.startsWith("TRUNCATE")) {
-                // DML/DDL操作
-                int rows = template.update(sql);
+            } else {
+                int rows = template.update(originalSql);
                 result.put(Constant.SUCCESS, true);
                 result.put("rows", rows);
-                result.put("type", "update");
                 result.put(Constant.MESSAGE, "操作成功，影响行数: " + rows);
-
-            } else {
-                result.put(Constant.SUCCESS, false);
-                result.put(Constant.MESSAGE, "不支持的SQL语句类型");
             }
 
         } catch (Exception e) {
@@ -268,12 +296,28 @@ public class DatabaseService {
             result.put(Constant.SUCCESS, false);
             result.put(Constant.MESSAGE, "执行失败: " + e.getMessage());
         }
+
         return result;
+    }
+
+    // SQL安全检查（简化版）
+    private boolean isUnsafeSql(String upperSql) {
+        // 检查是否包含危险操作
+        if (upperSql.contains("DROP DATABASE") ||
+                upperSql.contains("DROP SCHEMA") ||
+                upperSql.contains("TRUNCATE")) {
+            return true;
+        }
+
+        // 检查DELETE和UPDATE是否包含WHERE条件
+        return (upperSql.startsWith("DELETE") || upperSql.startsWith("UPDATE"))
+                && !upperSql.contains("WHERE");
     }
 
     /**
      * 获取图表数据
      */
+    @LogOperation(type = LogOperation.OperationType.QUERY, value = "获取图表数据")
     public Map<String, Object> getChartData(String sql, String chartType, String title) {
         JdbcTemplate template = getJdbcTemplate();
         Map<String, Object> result = new HashMap<>();

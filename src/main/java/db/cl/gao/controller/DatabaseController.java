@@ -199,24 +199,10 @@ public class DatabaseController {
         try {
             Map<String, Object> result = databaseService.executeQuery(sql.trim());
 
-            if (Boolean.TRUE.equals(result.get(Constant.SUCCESS))) {
-                // 构建响应数据
-                Map<String, Object> responseData = new HashMap<>();
-
-                if ("query".equals(result.get("type"))) {
-                    responseData.put("type", "query");
-                    responseData.put("data", result.get("data"));
-                    responseData.put("count", result.get("count"));
-                    responseData.put(Constant.MESSAGE, result.get(Constant.MESSAGE));
-                } else {
-                    responseData.put("type", "update");
-                    responseData.put("rows", result.get("rows"));
-                    responseData.put(Constant.MESSAGE, result.get(Constant.MESSAGE));
-                }
-
-                return ApiOutput.success(responseData);
+            if (Boolean.TRUE.equals(result.get("success"))) {
+                return ApiOutput.success(result);
             } else {
-                return ApiOutput.failure((String) result.get(Constant.MESSAGE));
+                return ApiOutput.failure((String) result.get("message"));
             }
         } catch (Exception e) {
             log.error("执行SQL失败: {}", sql, e);
