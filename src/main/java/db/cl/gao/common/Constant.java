@@ -32,8 +32,12 @@ public class Constant {
 
     public static final String TABLE_COUNT = "tableCount";
 
-
     public static final String UNKNOWN = "unknown";
+
+
+    public static final String COLUMN_NAME = "COLUMN_NAME";
+
+    public static final String ERRORS = "errors";
 
 
     public static final Pattern TABLE_NAME_PATTERN = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]*$");

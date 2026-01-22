@@ -1,6 +1,8 @@
 package db.cl.gao.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import db.cl.gao.common.Constant;
 import db.cl.gao.common.enums.ExportFormat;
 import db.cl.gao.common.excep.DbException;
@@ -27,6 +29,7 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 /**
  * 数据导入导出服务实现
@@ -43,7 +46,20 @@ public class DataImportExportService {
     private static final String ERROR_COLUMN = "__error";
     private static final String UTF_8_BOM = "\uFEFF";
 
+    // 配置JSON ObjectMapper
+    private static final ObjectMapper JSON_OBJECT_MAPPER = createJsonObjectMapper();
+
     private final DatabaseService databaseService;
+
+    /**
+     * 创建JSON专用的ObjectMapper
+     */
+    private static ObjectMapper createJsonObjectMapper() {
+        ObjectMapper mapper = new ObjectMapper();
+        mapper.registerModule(new JavaTimeModule());
+        mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+        return mapper;
+    }
 
     /**
      * 数据导出
@@ -80,6 +96,7 @@ public class DataImportExportService {
 
             List<Map<String, Object>> data = (List<Map<String, Object>>) queryResult.get("data");
 
+            // 将switch表达式改为传统switch语句
             switch (format) {
                 case EXCEL:
                     return exportToExcel(data, tableName);
@@ -107,29 +124,32 @@ public class DataImportExportService {
 
             // 使用 DatabaseService 获取表结构
             List<Map<String, Object>> columns = databaseService.getTableStructure(tableName);
-            List<String> columnNames = new ArrayList<>();
-            for (Map<String, Object> column : columns) {
-                columnNames.add((String) column.get("COLUMN_NAME"));
+            List<String> columnNames = columns.stream()
+                    .map(column -> (String) column.get(Constant.COLUMN_NAME))
+                    .collect(Collectors.toList());
+
+            try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
+                writeCsvTemplate(outputStream, columnNames);
+                return new ByteArrayResource(outputStream.toByteArray());
             }
-
-            ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-            out(outputStream, columnNames);
-
-            return new ByteArrayResource(outputStream.toByteArray());
 
         } finally {
             DatabaseContextHolder.clear();
         }
     }
 
-    private static void out(ByteArrayOutputStream outputStream, List<String> columnNames) throws IOException {
+    /**
+     * 写入CSV模板
+     */
+    private void writeCsvTemplate(ByteArrayOutputStream outputStream, List<String> columnNames) throws IOException {
+        CSVFormat csvFormat = CSVFormat.DEFAULT.builder()
+                .setHeader(columnNames.toArray(new String[0]))
+                .setSkipHeaderRecord(false)
+                .build();
+
         try (Writer writer = new OutputStreamWriter(outputStream, StandardCharsets.UTF_8);
-             CSVPrinter csvPrinter = new CSVPrinter(writer, CSVFormat.DEFAULT)) {
+             CSVPrinter csvPrinter = new CSVPrinter(writer, csvFormat)) {
 
-            // 写入表头
-            csvPrinter.printRecord(columnNames);
-
-            // 写入示例数据
             csvPrinter.printComment("请按照此格式填写数据，注意：");
             csvPrinter.printComment("1. 不要删除或修改表头");
             csvPrinter.printComment("2. 日期格式请使用 yyyy-MM-dd HH:mm:ss");
@@ -144,7 +164,6 @@ public class DataImportExportService {
                                   boolean truncateFirst, MultipartFile file) throws IOException {
         long startTime = System.currentTimeMillis();
         ImportResult result = new ImportResult();
-        List<Map<String, Object>> errorDetails = new ArrayList<>();
 
         try {
             if (StringUtils.hasText(database)) {
@@ -156,63 +175,78 @@ public class DataImportExportService {
 
             // 使用 DatabaseService 获取表结构
             List<Map<String, Object>> columnInfos = databaseService.getTableStructure(tableName);
-            List<String> tableColumns = new ArrayList<>();
-            for (Map<String, Object> column : columnInfos) {
-                tableColumns.add((String) column.get("COLUMN_NAME"));
-            }
+            List<String> tableColumns = columnInfos.stream()
+                    .map(column -> (String) column.get(Constant.COLUMN_NAME))
+                    .collect(Collectors.toList());
 
             // 清空表数据
             if (truncateFirst) {
                 truncateTable(tableName);
             }
 
-            // 解析CSV文件
-            String content = new String(file.getBytes(), StandardCharsets.UTF_8);
-            // 去除UTF-8 BOM
-            if (content.startsWith(UTF_8_BOM)) {
-                content = content.substring(1);
-            }
-
-            try (StringReader stringReader = new StringReader(content);
-                 CSVParser csvParser = new CSVParser(stringReader,
-                         CSVFormat.DEFAULT.withFirstRecordAsHeader().withIgnoreHeaderCase())) {
-
-                List<Map<String, String>> records = new ArrayList<>();
-                AtomicInteger successCount = new AtomicInteger(0);
-
-                for (CSVRecord csvRecord : csvParser) {
-                    Map<String, String> recordMap = csvRecord.toMap();
-                    records.add(recordMap);
-
-                    // 批量处理
-                    if (records.size() >= BATCH_SIZE) {
-                        processBatch(tableName, tableColumns, records,
-                                successCount, errorDetails);
-                        records.clear();
-                    }
-                }
-
-                // 处理剩余记录
-                if (!records.isEmpty()) {
-                    processBatch(tableName, tableColumns, records,
-                            successCount, errorDetails);
-                }
-
-                result.setImportedRows(successCount.get());
-                result.setErrorRows(errorDetails.size());
-            }
+            // 处理CSV文件
+            return processCsvFile(file, tableName, tableColumns, result, startTime);
 
         } finally {
-            result.setCostTime(System.currentTimeMillis() - startTime);
-            if (!errorDetails.isEmpty()) {
-                Map<String, Object> errorMap = new HashMap<>();
-                errorMap.put("errors", errorDetails);
-                result.setErrorDetails(errorMap);
-            }
             DatabaseContextHolder.clear();
         }
+    }
 
-        return result;
+    /**
+     * 处理CSV文件导入
+     */
+    private ImportResult processCsvFile(MultipartFile file, String tableName,
+                                        List<String> tableColumns, ImportResult result,
+                                        long startTime) throws IOException {
+        List<Map<String, Object>> errorDetails = new ArrayList<>();
+
+        // 解析CSV文件
+        String content = new String(file.getBytes(), StandardCharsets.UTF_8);
+        // 去除UTF-8 BOM
+        if (content.startsWith(UTF_8_BOM)) {
+            content = content.substring(1);
+        }
+
+        CSVFormat csvFormat = CSVFormat.DEFAULT.builder()
+                .setHeader()
+                .setSkipHeaderRecord(true)
+                .setIgnoreHeaderCase(true)
+                .build();
+
+        try (StringReader stringReader = new StringReader(content);
+             CSVParser csvParser = new CSVParser(stringReader, csvFormat)) {
+
+            List<Map<String, String>> records = new ArrayList<>();
+            AtomicInteger successCount = new AtomicInteger(0);
+
+            for (CSVRecord csvRecord : csvParser) {
+                Map<String, String> recordMap = csvRecord.toMap();
+                records.add(recordMap);
+
+                // 批量处理
+                if (records.size() >= BATCH_SIZE) {
+                    processBatch(tableName, tableColumns, records, successCount, errorDetails);
+                    records.clear();
+                }
+            }
+
+            // 处理剩余记录
+            if (!records.isEmpty()) {
+                processBatch(tableName, tableColumns, records, successCount, errorDetails);
+            }
+
+            result.setImportedRows(successCount.get());
+            result.setErrorRows(errorDetails.size());
+
+            if (!errorDetails.isEmpty()) {
+                Map<String, Object> errorMap = new HashMap<>();
+                errorMap.put(Constant.ERRORS, errorDetails);
+                result.setErrorDetails(errorMap);
+            }
+
+            result.setCostTime(System.currentTimeMillis() - startTime);
+            return result;
+        }
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -232,10 +266,9 @@ public class DataImportExportService {
 
             // 使用 DatabaseService 获取表结构
             List<Map<String, Object>> columnInfos = databaseService.getTableStructure(tableName);
-            List<String> tableColumns = new ArrayList<>();
-            for (Map<String, Object> column : columnInfos) {
-                tableColumns.add((String) column.get("COLUMN_NAME"));
-            }
+            List<String> tableColumns = columnInfos.stream()
+                    .map(column -> (String) column.get(Constant.COLUMN_NAME))
+                    .collect(Collectors.toList());
 
             // 清空表数据
             if (truncateFirst) {
@@ -294,7 +327,7 @@ public class DataImportExportService {
             result.setCostTime(System.currentTimeMillis() - startTime);
             if (!errorDetails.isEmpty()) {
                 Map<String, Object> errorMap = new HashMap<>();
-                errorMap.put("errors", errorDetails);
+                errorMap.put(Constant.ERRORS, errorDetails);
                 result.setErrorDetails(errorMap);
             }
             DatabaseContextHolder.clear();
@@ -335,16 +368,13 @@ public class DataImportExportService {
                         successCount++;
                     } else {
                         errorCount++;
-                        Map<String, Object> errorDetail = new HashMap<>();
-                        errorDetail.put("sql", sql);
-                        errorDetail.put(ERROR_COLUMN, executeResult.get(Constant.MESSAGE));
+                        Map<String, Object> errorDetail = createSqlErrorDetail(sql,
+                                (String) executeResult.get(Constant.MESSAGE));
                         errorDetails.add(errorDetail);
                     }
                 } catch (Exception e) {
                     errorCount++;
-                    Map<String, Object> errorDetail = new HashMap<>();
-                    errorDetail.put("sql", sql);
-                    errorDetail.put(ERROR_COLUMN, e.getMessage());
+                    Map<String, Object> errorDetail = createSqlErrorDetail(sql, e.getMessage());
                     errorDetails.add(errorDetail);
                     log.error("执行SQL失败: {}", sql, e);
                 }
@@ -354,7 +384,7 @@ public class DataImportExportService {
             result.setErrorRows(errorCount);
             if (!errorDetails.isEmpty()) {
                 Map<String, Object> errorMap = new HashMap<>();
-                errorMap.put("errors", errorDetails);
+                errorMap.put(Constant.ERRORS, errorDetails);
                 result.setErrorDetails(errorMap);
             }
 
@@ -364,6 +394,16 @@ public class DataImportExportService {
         }
 
         return result;
+    }
+
+    /**
+     * 创建SQL错误详情
+     */
+    private Map<String, Object> createSqlErrorDetail(String sql, String errorMessage) {
+        Map<String, Object> errorDetail = new HashMap<>();
+        errorDetail.put("sql", sql);
+        errorDetail.put(ERROR_COLUMN, errorMessage);
+        return errorDetail;
     }
 
     /**
@@ -455,10 +495,10 @@ public class DataImportExportService {
     }
 
     /**
-     * 导出为JSON
+     * 导出为JSON - 使用配置好的ObjectMapper
      */
     private Resource exportToJson(List<Map<String, Object>> data) throws IOException {
-        String json = new ObjectMapper().writeValueAsString(data);
+        String json = JSON_OBJECT_MAPPER.writeValueAsString(data);
         return new ByteArrayResource(json.getBytes(StandardCharsets.UTF_8));
     }
 
@@ -477,12 +517,6 @@ public class DataImportExportService {
 
         Set<String> columns = data.get(0).keySet();
 
-        export(data, tableName, columns, sqlBuilder);
-
-        return new ByteArrayResource(sqlBuilder.toString().getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static void export(List<Map<String, Object>> data, String tableName, Set<String> columns, StringBuilder sqlBuilder) {
         for (Map<String, Object> row : data) {
             StringBuilder insertSql = new StringBuilder();
             insertSql.append("INSERT INTO ").append(tableName).append(" (");
@@ -497,25 +531,31 @@ public class DataImportExportService {
             }
             insertSql.append(") VALUES (");
 
-            // 值
-            for (int i = 0; i < columnList.size(); i++) {
-                String column = columnList.get(i);
-                Object value = row.get(column);
-                if (value == null) {
-                    insertSql.append("NULL");
-                } else if (value instanceof Number) {
-                    insertSql.append(value);
-                } else {
-                    insertSql.append("'").append(value.toString().replace("'", "''")).append("'");
-                }
-
-                if (i < columnList.size() - 1) {
-                    insertSql.append(", ");
-                }
-            }
+            columnRecords(row, columnList, insertSql);
             insertSql.append(");\n");
 
             sqlBuilder.append(insertSql);
+        }
+
+        return new ByteArrayResource(sqlBuilder.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void columnRecords(Map<String, Object> row, List<String> columnList, StringBuilder insertSql) {
+        // 值
+        for (int i = 0; i < columnList.size(); i++) {
+            String column = columnList.get(i);
+            Object value = row.get(column);
+            if (value == null) {
+                insertSql.append("NULL");
+            } else if (value instanceof Number) {
+                insertSql.append(value);
+            } else {
+                insertSql.append("'").append(value.toString().replace("'", "''")).append("'");
+            }
+
+            if (i < columnList.size() - 1) {
+                insertSql.append(", ");
+            }
         }
     }
 
@@ -560,14 +600,14 @@ public class DataImportExportService {
             }
         }
 
-        log(tableName, records, successCount, errorDetails, validRecords);
+        vaildRecord(tableName, records, successCount, errorDetails, validRecords);
     }
 
-    private void log(String tableName, List<Map<String, String>> records, AtomicInteger successCount, List<Map<String, Object>> errorDetails, List<Map<String, Object>> validRecords) {
+    private void vaildRecord(String tableName, List<Map<String, String>> records, AtomicInteger successCount, List<Map<String, Object>> errorDetails, List<Map<String, Object>> validRecords) {
         if (!validRecords.isEmpty()) {
+            int totalSuccess = 0;
             try {
                 // 批量插入
-                int totalSuccess = 0;
                 for (Map<String, Object> stringObjectMap : validRecords) {
                     String insertSql = buildInsertSql(tableName, stringObjectMap);
                     Map<String, Object> result = databaseService.executeQuery(insertSql);
@@ -616,20 +656,24 @@ public class DataImportExportService {
             return null;
         }
 
+        String trimmedValue = value.trim();
+
         // 尝试转换为整数
         try {
-            return Integer.parseInt(value);
+            return Integer.parseInt(trimmedValue);
         } catch (NumberFormatException e1) {
             // 尝试转换为浮点数
             try {
-                return Double.parseDouble(value);
+                return Double.parseDouble(trimmedValue);
             } catch (NumberFormatException e2) {
                 // 尝试转换为布尔值
-                if ("true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value)) {
-                    return Boolean.parseBoolean(value);
+                if ("true".equalsIgnoreCase(trimmedValue)) {
+                    return true;
+                } else if ("false".equalsIgnoreCase(trimmedValue)) {
+                    return false;
                 }
                 // 返回字符串
-                return value.trim();
+                return trimmedValue;
             }
         }
     }
@@ -657,9 +701,7 @@ public class DataImportExportService {
 
             if (value == null) {
                 sql.append("NULL");
-            } else if (value instanceof Number) {
-                sql.append(value);
-            } else if (value instanceof Boolean) {
+            } else if (value instanceof Number || value instanceof Boolean) {
                 sql.append(value);
             } else {
                 sql.append("'").append(value.toString().replace("'", "''")).append("'");

@@ -174,38 +174,7 @@ public class OperationLogAspect {
                 simplifiedResult.put("type", "FILE_DOWNLOAD");
                 simplifiedResult.put("status", "SUCCESS");
 
-                // 尝试获取文件信息
-                try {
-                    if (result instanceof ResponseEntity) {
-                        ResponseEntity<?> responseEntity = (ResponseEntity<?>) result;
-                        HttpHeaders headers = responseEntity.getHeaders();
-
-                        // 获取内容类型
-                        MediaType contentType = headers.getContentType();
-                        if (contentType != null) {
-                            simplifiedResult.put("contentType", contentType.toString());
-                        }
-
-                        // 获取文件名
-                        String contentDisposition = headers.getFirst(HttpHeaders.CONTENT_DISPOSITION);
-                        if (contentDisposition != null && contentDisposition.contains("filename=")) {
-                            String fileName = contentDisposition.substring(
-                                    contentDisposition.indexOf("filename=") + 9
-                            ).replace("\"", "");
-                            simplifiedResult.put("fileName", fileName);
-                        }
-
-                        // 获取文件大小
-                        Object body = responseEntity.getBody();
-                        if (body instanceof ByteArrayResource) {
-                            long contentLength = ((ByteArrayResource) body).contentLength();
-                            simplifiedResult.put("fileSize", contentLength);
-                            simplifiedResult.put("fileSizeReadable", formatFileSize(contentLength));
-                        }
-                    }
-                } catch (Exception e) {
-                    log.debug("获取文件信息失败", e);
-                }
+                getFileInfo(result, simplifiedResult);
 
                 // 记录简化信息
                 String resultJson = objectMapper.writeValueAsString(simplifiedResult);
@@ -228,6 +197,41 @@ public class OperationLogAspect {
             } catch (Exception ex) {
                 log.error("记录操作日志失败", ex);
             }
+        }
+    }
+
+    private void getFileInfo(Object result, Map<String, Object> simplifiedResult) {
+        // 尝试获取文件信息
+        try {
+            if (result instanceof ResponseEntity) {
+                ResponseEntity<?> responseEntity = (ResponseEntity<?>) result;
+                HttpHeaders headers = responseEntity.getHeaders();
+
+                // 获取内容类型
+                MediaType contentType = headers.getContentType();
+                if (contentType != null) {
+                    simplifiedResult.put("contentType", contentType.toString());
+                }
+
+                // 获取文件名
+                String contentDisposition = headers.getFirst(HttpHeaders.CONTENT_DISPOSITION);
+                if (contentDisposition != null && contentDisposition.contains("filename=")) {
+                    String fileName = contentDisposition.substring(
+                            contentDisposition.indexOf("filename=") + 9
+                    ).replace("\"", "");
+                    simplifiedResult.put("fileName", fileName);
+                }
+
+                // 获取文件大小
+                Object body = responseEntity.getBody();
+                if (body instanceof ByteArrayResource) {
+                    long contentLength = ((ByteArrayResource) body).contentLength();
+                    simplifiedResult.put("fileSize", contentLength);
+                    simplifiedResult.put("fileSizeReadable", formatFileSize(contentLength));
+                }
+            }
+        } catch (Exception e) {
+            log.debug("获取文件信息失败", e);
         }
     }
 
