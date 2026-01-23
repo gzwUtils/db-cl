@@ -1,6 +1,7 @@
 server:
   port: 20006
 
+#默认数据库。随便给一个就行
 spring:
   datasource:
     url: jdbc:mysql://localhost:3306/doc?useSSL=false&serverTimezone=UTC&characterEncoding=UTF-8
@@ -40,6 +41,33 @@ pagehelper:
 
 spring.jackson.date-format: yyyy-MM-dd HH:mm:ss
 spring.jackson.time-zone: GMT+8
+
+
+# 验证码配置
+captcha:
+  border: yes
+  border-color: 105,179,90
+  image-width: 160
+  image-height: 60
+  text-producer-font-size: 38
+  text-producer-char-length: 4
+  text-producer-char-space: 3
+
+# JWT配置
+jwt:
+  secret:
+    base: "gao_yw_wh_009412sq"
+    refresh-interval: 43200000  # 12小时刷新一次
+  expiration: 86400000  # 24小时
+  header: Authorization
+  token-prefix: "Bearer "
+
+
+
+#系统默认账户、密码
+system:
+  account: admin
+  password: 122800
 
 logging:
   level:

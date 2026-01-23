@@ -305,7 +305,8 @@ public class DatabaseService {
         // 检查是否包含危险操作
         if (upperSql.contains("DROP DATABASE") ||
                 upperSql.contains("DROP SCHEMA") ||
-                upperSql.contains("TRUNCATE")) {
+                upperSql.contains("TRUNCATE") ||
+                upperSql.contains("DROP TABLE") )  {
             return true;
         }
 

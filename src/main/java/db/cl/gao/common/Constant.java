@@ -17,6 +17,7 @@ public class Constant {
     public static final int FORBIDDEN_CODE = 403;
     public static final int NOT_FOUND_CODE = 404;
     public static final int INTERNAL_ERROR_CODE = 500;
+    public static final int LOK_CODE = 423;
 
 
     public static final String SUCCESS = "success";
@@ -38,6 +39,9 @@ public class Constant {
     public static final String COLUMN_NAME = "COLUMN_NAME";
 
     public static final String ERRORS = "errors";
+
+
+    public static final String EXPIRES_IN = "expiresIn";
 
 
     public static final Pattern TABLE_NAME_PATTERN = Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_]*$");
